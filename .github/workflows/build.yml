@@ -1,0 +1,65 @@
+name: Android Library Build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - '*'
+
+jobs:
+  build-android-library:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.0'
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Build Android Library
+        run: |
+          go mod download
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          gomobile init
+          go get golang.org/x/mobile/bind
+          gomobile bind -androidapi 21 -v -target=android/arm64 -o frp_arm64-v8a.aar .
+          gomobile bind -androidapi 21 -v -target=android/arm -o frp_armeabi-v7a.aar .
+          gomobile bind -androidapi 21 -v -target=android/amd64 -o frp_x86_64.aar .
+          gomobile bind -androidapi 21 -v -target=android/386 -o frp_x86.aar .
+          gomobile bind -androidapi 21 -v -o frp_universal.aar .
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-build
+          path: |
+            frp_arm64-v8a.aar
+            frp_armeabi-v7a.aar
+            frp_x86_64.aar
+            frp_x86.aar
+            frp_universal.aar
+
+      - name: Publish Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            frp_arm64-v8a.aar
+            frp_armeabi-v7a.aar
+            frp_x86_64.aar
+            frp_x86.aar
+            frp_universal.aar
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
