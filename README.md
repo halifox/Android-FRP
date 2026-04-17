@@ -1,121 +1,239 @@
-# Android AAR for frp
+# frp_android
 
-该项目提供了一个 [fatedier/frp](https://github.com/fatedier/frp) 客户端的 Android AAR 库封装，使您可以在 Android 应用中直接使用 `frp` 功能。
+`frp_android` 是一个面向 Android 使用场景的 frpc Go 封装层。项目基于 `github.com/fatedier/frp`，对外提供了较直接的配置对象和生命周期方法，便于通过 `gomobile bind` 生成 AAR 后在 Android 应用中调用。
+
+当前仓库重点提供：
+
+- `FrpcConfig`：客户端公共配置
+- `FrpcProxyConfig`：代理配置
+- `FrpcVisitorConfig`：访问者配置
+- `Start` / `Stop` / `Reload`：启动、停止、重载 frpc
+
+本文档中的示例参考了 Android `Service` 场景，但已去除实际业务域名、令牌、设备标识规则等隐私信息。
 
 ## 使用方法
 
-将 `frp.aar` 集成到您的 Android 项目中：
+### 1. 在 Android 项目中引入
 
-1. **将 AAR 文件导入项目**：
-   将生成的 `frp.aar` 文件放入 Android 项目的 `libs` 目录下。
+将 AAR 放入 Android 项目的 `libs` 目录，然后在 Gradle 中声明：
 
-2. **在 `build.gradle` 文件中添加库依赖**：
-   打开项目的 `build.gradle` 文件（通常在 `app` 目录下），在 `dependencies` 块中添加以下内容：
-    ```kotlin
-    implementation(files("libs/frp.aar"))
-    ```
+```gradle
+dependencies {
+    implementation(files("libs/frpandroid.aar"))
+}
+```
 
-3. **在代码中调用 `frp` 客户端**：
-   导入并使用 `Frp` 类中的方法，以便在 Android 应用中调用 `frp` 的功能。例如：
-    ```kotlin
-    import frp.Frp
+### 2. 创建并启动 frpc
 
-    // 启动服务端
-    Frp.runServer(configFilePath)
+下面是一个脱敏后的 Kotlin 示例，适合放在 Android `Service` 或其他后台组件中调用：
 
-    // 启动客户端
-    Frp.runClient(configFilePath)
-    ```
-   请将 `configFilePath` 替换为 `frp` 配置文件的路径，以正确初始化 `frp`。
+```kotlin
+package com.example.app
 
-以上步骤完成后，您便可以在 Android 应用中使用 `frp` 提供的功能。
+import android.app.Service
+import android.content.Intent
+import android.os.IBinder
+import frpandroid.Frpandroid
+
+class FrpcService : Service() {
+    override fun onCreate() {
+        super.onCreate()
+        startFrpc()
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        return START_STICKY
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onDestroy() {
+        super.onDestroy()
+        Frpandroid.stop()
+    }
+
+    private fun startFrpc() {
+        try {
+            val cfg = Frpandroid.newFrpcConfig()
+            cfg.setServerAddr("your-frps.example.com")
+            cfg.setServerPort(7000)
+            cfg.setAuthToken("replace-with-your-token")
+            cfg.setLoginFailExit(false)
+            cfg.setLogTo("/sdcard/Android/data/your.package.name/files/frpc.log")
+            cfg.setLogMaxDays(3)
+
+            val proxy = Frpandroid.newFrpcProxyConfig("stcp")
+            proxy.setName("adb-device-001")
+            proxy.setSecretKey("replace-with-strong-secret")
+            proxy.setLocalIP("127.0.0.1")
+            proxy.setLocalPort(5555)
+            proxy.setUseEncryption(true)
+            proxy.setUseCompression(true)
+
+            cfg.addProxy(proxy)
+            Frpandroid.start(cfg)
+
+            //reload
+            proxy.setSecretKey("replace-with-strong-secret")
+            Frpandroid.reload(cfg)
+        } catch (t: Throwable) {
+            t.printStackTrace()
+        }
+    }
+}
+```
+
+### 3. 常用配置项
+
+`FrpcConfig` 常见配置：
+
+- `setServerAddr(String)`：frps 地址
+- `setServerPort(Int)`：frps 端口
+- `setAuthToken(String)`：token 鉴权
+- `setLoginFailExit(Boolean)`：登录失败后是否直接退出
+- `setLogTo(String)`：日志输出路径
+- `setLogLevel(String)`：日志级别
+- `setLogMaxDays(Long)`：日志保留天数
+- `addProxy(FrpcProxyConfig)`：添加代理
+- `addVisitor(FrpcVisitorConfig)`：添加访问者
+
+`FrpcProxyConfig` 常见配置：
+
+- `newFrpcProxyConfig("tcp" | "udp" | "http" | "https" | "stcp" | "xtcp" | "sudp")`
+- `setName(String)`：代理名称
+- `setLocalIP(String)`：本地服务地址
+- `setLocalPort(Int)`：本地服务端口
+- `setUseEncryption(Boolean)`：是否启用加密
+- `setUseCompression(Boolean)`：是否启用压缩
+- `setSecretKey(String)`：`stcp` / `xtcp` 等场景使用的密钥
+
+`FrpcVisitorConfig` 常用于内网穿透访问端场景，例如：
+
+- `newFrpcVisitorConfig("stcp")`
+- `setName(String)`
+- `setServerName(String)`
+- `setSecretKey(String)`
+- `setBindAddr(String)`
+- `setBindPort(Int)`
+
+### 4. 生命周期建议
+
+推荐做法：
+
+- 在 `Service.onCreate()` 或明确的启动入口中调用 `Frpandroid.start(cfg)`
+- 在组件销毁时调用 `Frpandroid.stop()`
+- 配置变更后使用 `Frpandroid.reload(cfg)` 重载
+
+注意事项：
+
+- 重复调用 `start` 会返回错误，因为内部已做运行状态保护
+- `stop` 在未运行时会直接返回，不会抛错
+- `reload` 的行为是先 `stop` 再 `start`
 
 ## 构建指南
 
-按以下步骤构建 AAR 库：
+### 环境要求
 
-1. **安装 `gomobile`**：
-    ```bash
-    go install golang.org/x/mobile/cmd/gomobile@latest
-    ```
-   该命令会安装 `gomobile` 工具到 `$GOPATH/bin` 中。
+建议准备以下环境：
 
-2. **初始化 `gomobile`**：
-    ```bash
-    gomobile init
-    ```
-   此步骤下载并配置 Android 和 iOS 的 SDK 依赖。如果您没有配置 Android SDK 和 NDK，请按照之前的说明进行操作。
+- Go
+- Android SDK
+- `gomobile`
+- 可正常编译 `golang.org/x/mobile` 的 Android 工具链
 
-3. **获取 `gomobile bind` 包**：
-    ```bash
-    go get golang.org/x/mobile/bind
-    ```
-   该命令获取 `bind` 包，以便 `gomobile` 能够将 Go 包绑定为移动平台库。
+### 安装 gomobile
 
-4. **构建 AAR**：
-    ```bash
-    gomobile bind -androidapi 21 .
-    ```
-    - 此命令将在当前目录下生成 AAR 文件（包含 `frp` 客户端的 Android 库）。
-    - 如果您希望生成 iOS Framework，可以使用 `-target=ios` 参数。
-    - 构建完成后，目录下会生成：
-        - `frp.aar`：包含 frp 客户端的 Android AAR 库。
-        - `frp-sources.jar`：源代码 JAR，用于参考。
-
-## gomobile 简介
-
-`gomobile` 是 Go 语言的一个移动开发工具集，旨在帮助开发者将 Go 编写的代码编译为 Android 和 iOS 可用的库。这允许开发者在移动应用中使用 Go 实现的功能。`gomobile` 包含两个核心命令：`gomobile init` 和
-`gomobile bind`。
-
-### 基本功能
-
-- **跨平台支持**：允许开发者在 Android 和 iOS 上复用用 Go 编写的代码。
-- **AAR 和 Framework 打包**：将 Go 包编译为 Android 的 AAR 和 iOS 的 Framework，使它们在各自平台上作为原生库使用。
-- **API 导出**：将 Go 包中的公共 API 自动转换为 Java（Android）或 Objective-C（iOS）接口，从而在移动端应用中调用 Go 代码。
-
-### 安装和初始化
-
-1. **安装 `gomobile`**：
-   首先，确保您安装了最新版的 Go。运行以下命令安装 `gomobile`：
-    ```bash
-    go install golang.org/x/mobile/cmd/gomobile@latest
-    ```
-   `gomobile` 将自动下载并安装到 `$GOPATH/bin` 目录下。
-
-2. **初始化 `gomobile`**：
-   `gomobile init` 命令会安装所需的 Android 和 iOS 工具链，并配置环境，以便 `gomobile` 使用。在命令行中运行：
-    ```bash
-    gomobile init
-    ```
-   **注意**：确保您的系统安装了 Android SDK 和 Android NDK，尤其是在 Android 平台上构建时。
-
-    - **Android SDK**：请从 [Android 开发者网站](https://developer.android.com/studio)下载安装，并确保 `sdkmanager` 和 `ndk-bundle` 路径已添加到环境变量中。
-    - **Android NDK**：Android NDK 必须版本不低于 r19。
-
-3. **获取 `gomobile bind` 包**：
-   `gomobile bind` 是 `gomobile` 工具集中的一个命令，用于生成 Android AAR 和 iOS Framework。运行以下命令安装该包：
-    ```bash
-    go get golang.org/x/mobile/bind
-    ```
-   安装完成后，您可以使用 `gomobile bind` 将 Go 包编译为 Android AAR 或 iOS Framework。
-
-### gomobile bind 命令
-
-`gomobile bind` 将 Go 包中的公共方法编译为移动平台可用的库。以下是常用的参数说明：
-
-- `-target`：指定目标平台，如 `android`、`ios` 或 `android/ios`。
-- `-androidapi`：设置 Android 的最低 API 级别（默认为 15）。例如，`-androidapi 21` 表示构建的库需要 Android 5.0 (API 21) 以上的设备。
-- `-javapkg`：自定义生成的 Java 包名，默认与 Go 包名称一致。
-
-示例：
-
-```bash
-gomobile bind -target=android -androidapi 21 .
+```powershell
+go install golang.org/x/mobile/cmd/gomobile@latest
+gomobile init
 ```
 
-该命令会将当前目录中的 Go 包编译为 Android 库，并设置最低 API 级别为 21。
+### 生成 Android AAR
 
-### 常见问题
+本仓库当前没有内置自动化脚本，通常直接在仓库根目录执行 `gomobile bind`：
 
-- **无法初始化**：如果 `gomobile init` 失败，确保您的系统已安装 Go 和 Java SDK（用于 Android 开发）以及 Android NDK。
-- **Go 版本不支持**：`gomobile` 可能要求 Go 的较新版本。建议始终使用最新的 Go 和 `gomobile` 版本。
+```powershell
+gomobile bind -target=android -o frpandroid.aar
+```
+
+如果本地工具链配置正常，执行后会生成：
+
+- `frpandroid.aar`
+- 可能附带源码包或中间产物，具体取决于本地 gomobile 版本和构建方式
+
+### 构建建议
+
+- 优先先在本仓库中验证 `gomobile bind` 成功，再接入 Android 项目
+- Android 侧建议把日志目录放在应用私有目录，避免直接写公共存储
+- 生产环境不要把服务地址、token、secret 写死在源码中
+
+## 常见问题
+
+### 1. `start` 调用失败，提示配置错误
+
+优先检查以下项目：
+
+- `ServerAddr` 是否为空
+- `ServerPort` 是否大于 0
+- 是否至少添加了一个 `proxy` 或 `visitor`
+- `newFrpcProxyConfig(...)` / `newFrpcVisitorConfig(...)` 传入的类型字符串是否正确
+
+### 2. 重复启动报错 `frpc is already running`
+
+这是预期行为。当前实现内部做了单例控制，同一时刻只允许一个 frpc 实例运行。
+
+可选处理方式：
+
+- 启动前自行维护状态，避免重复调用
+- 配置变化时使用 `Frpandroid.reload(cfg)`
+- 在适当时机先调用 `Frpandroid.stop()`
+
+### 3. Android 后台运行一段时间后断开
+
+这通常不是本库独有问题，常见原因包括：
+
+- 系统后台限制
+- 设备厂商省电策略
+- 前台服务未正确配置
+- 网络切换或系统休眠
+
+建议：
+
+- 对长期连接场景使用前台服务
+- 根据设备系统版本补齐后台运行权限和通知配置
+- 配合日志输出分析断线原因
+
+### 4. 日志文件无法写入
+
+常见原因：
+
+- 日志目录不存在
+- 应用无对应目录写权限
+- Android 高版本对外部存储访问有限制
+
+建议优先使用应用私有目录，例如：
+
+```text
+/sdcard/Android/data/<your.package.name>/files/frpc.log
+```
+
+或者直接使用应用内部文件目录。
+
+### 5. `stcp` / `xtcp` 无法连通
+
+优先检查：
+
+- 服务端和访问端的 `secretKey` 是否一致
+- `serverName` / `proxy name` 是否匹配
+- 本地服务地址和端口是否真实可访问
+- frps 服务端是否已正确开启对应能力
+
+### 6. 是否可以直接照搬示例里的设备命名方式
+
+不建议。设备标识、MAC、序列号、真实域名、认证口令都属于敏感信息或高风险信息。
+
+建议改为：
+
+- 使用你自己的设备编号体系
+- 使用后端下发的短期凭证
+- 避免把唯一设备标识直接暴露在代理名中

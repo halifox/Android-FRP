@@ -1,92 +1,154 @@
-package frp
+package frpandroid
 
 import (
 	"context"
-	"os"
-	"path/filepath"
+	"fmt"
+	"sync"
 
 	"github.com/fatedier/frp/client"
 	"github.com/fatedier/frp/pkg/config"
 	"github.com/fatedier/frp/pkg/config/source"
-	"github.com/fatedier/frp/pkg/policy/featuregate"
-	"github.com/fatedier/frp/pkg/util/log"
-	"github.com/fatedier/frp/server"
+	v1 "github.com/fatedier/frp/pkg/config/v1"
+	frplog "github.com/fatedier/frp/pkg/util/log"
 )
 
-func RunClient(cfgFile string) {
-	result, err := config.LoadClientConfigResult(cfgFile, true)
-	if err != nil {
-		println(err.Error())
-		os.Exit(1)
-	}
-	if len(result.Common.FeatureGates) > 0 {
-		if err := featuregate.SetFromMap(result.Common.FeatureGates); err != nil {
-			println(err.Error())
-			os.Exit(1)
-		}
-	}
+var defaultController = &frpcController{}
 
-	configSource := source.NewConfigSource()
-	if err := configSource.ReplaceAll(result.Proxies, result.Visitors); err != nil {
-		println(err.Error())
-		os.Exit(1)
-	}
-
-	var storeSource *source.StoreSource
-	if result.Common.Store.IsEnabled() {
-		storePath := result.Common.Store.Path
-		if storePath != "" && cfgFile != "" && !filepath.IsAbs(storePath) {
-			storePath = filepath.Join(filepath.Dir(cfgFile), storePath)
-		}
-
-		storeSource, err = source.NewStoreSource(source.StoreSourceConfig{
-			Path: storePath,
-		})
-		if err != nil {
-			println(err.Error())
-			os.Exit(1)
-		}
-	}
-
-	aggregator := source.NewAggregator(configSource)
-	if storeSource != nil {
-		aggregator.SetStoreSource(storeSource)
-	}
-
-	proxyCfgs, visitorCfgs, err := aggregator.Load()
-	if err != nil {
-		println(err.Error())
-		os.Exit(1)
-	}
-
-	proxyCfgs, visitorCfgs = config.FilterClientConfigurers(result.Common, proxyCfgs, visitorCfgs)
-	proxyCfgs = config.CompleteProxyConfigurers(proxyCfgs)
-	visitorCfgs = config.CompleteVisitorConfigurers(visitorCfgs)
-	log.InitLogger(result.Common.Log.To, result.Common.Log.Level, int(result.Common.Log.MaxDays), result.Common.Log.DisablePrintColor)
-
-	svr, err := client.NewService(client.ServiceOptions{
-		Common:                 result.Common,
-		ConfigSourceAggregator: aggregator,
-		ConfigFilePath:         cfgFile,
-	})
-	if err != nil {
-		println(err.Error())
-		os.Exit(1)
-	}
-	svr.Run(context.Background())
+func Start(cfg *FrpcConfig) error {
+	return defaultController.start(cfg)
 }
 
-func RunServer(cfgFile string) {
-	cfg, _, err := config.LoadServerConfig(cfgFile, true)
-	if err != nil {
-		println(err.Error())
-		os.Exit(1)
+func Stop() error {
+	return defaultController.stop()
+}
+
+func Reload(cfg *FrpcConfig) error {
+	return defaultController.reload(cfg)
+}
+
+type frpcController struct {
+	mu sync.Mutex
+
+	service *client.Service
+	cancel  context.CancelFunc
+	done    chan error
+
+	running bool
+}
+
+func (c *frpcController) start(cfg *FrpcConfig) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.running {
+		return fmt.Errorf("frpc is already running")
 	}
-	log.InitLogger(cfg.Log.To, cfg.Log.Level, int(cfg.Log.MaxDays), cfg.Log.DisablePrintColor)
-	svr, err := server.NewService(cfg)
+
+	service, err := buildService(cfg)
 	if err != nil {
-		println(err.Error())
-		os.Exit(1)
+		return err
 	}
-	svr.Run(context.Background())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+
+	c.service = service
+	c.cancel = cancel
+	c.done = done
+	c.running = true
+
+	go c.run(service, ctx, done)
+	return nil
+}
+
+func (c *frpcController) stop() error {
+	c.mu.Lock()
+	if !c.running {
+		c.mu.Unlock()
+		return nil
+	}
+
+	cancel := c.cancel
+	done := c.done
+	c.mu.Unlock()
+
+	cancel()
+	return <-done
+}
+
+func (c *frpcController) reload(cfg *FrpcConfig) error {
+	if err := c.stop(); err != nil {
+		return err
+	}
+	return c.start(cfg)
+}
+
+func (c *frpcController) run(service *client.Service, ctx context.Context, done chan error) {
+	err := service.Run(ctx)
+
+	c.mu.Lock()
+	if c.service == service {
+		c.service = nil
+		c.cancel = nil
+		c.done = nil
+		c.running = false
+	}
+	c.mu.Unlock()
+
+	done <- err
+	close(done)
+}
+
+func buildService(cfg *FrpcConfig) (*client.Service, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config is nil")
+	}
+
+	fullConfig := cfg.ClientConfig
+	common := fullConfig.ClientCommonConfig
+	if err := common.Complete(); err != nil {
+		return nil, err
+	}
+	if common.ServerAddr == "" {
+		return nil, fmt.Errorf("ServerAddr is required")
+	}
+	if common.ServerPort <= 0 {
+		return nil, fmt.Errorf("ServerPort is required")
+	}
+
+	frplog.InitLogger(common.Log.To, common.Log.Level, int(common.Log.MaxDays), common.Log.DisablePrintColor)
+
+	proxies := make([]v1.ProxyConfigurer, 0, len(fullConfig.Proxies))
+	for _, item := range fullConfig.Proxies {
+		if item.ProxyConfigurer == nil {
+			return nil, fmt.Errorf("proxy config is nil")
+		}
+		proxies = append(proxies, item.ProxyConfigurer.Clone())
+	}
+
+	visitors := make([]v1.VisitorConfigurer, 0, len(fullConfig.Visitors))
+	for _, item := range fullConfig.Visitors {
+		if item.VisitorConfigurer == nil {
+			return nil, fmt.Errorf("visitor config is nil")
+		}
+		visitors = append(visitors, item.VisitorConfigurer.Clone())
+	}
+
+	if len(proxies) == 0 && len(visitors) == 0 {
+		return nil, fmt.Errorf("at least one proxy or visitor is required")
+	}
+
+	proxies, visitors = config.FilterClientConfigurers(&common, proxies, visitors)
+	proxies = config.CompleteProxyConfigurers(proxies)
+	visitors = config.CompleteVisitorConfigurers(visitors)
+
+	configSource := source.NewConfigSource()
+	if err := configSource.ReplaceAll(proxies, visitors); err != nil {
+		return nil, err
+	}
+
+	return client.NewService(client.ServiceOptions{
+		Common:                 &common,
+		ConfigSourceAggregator: source.NewAggregator(configSource),
+	})
 }
