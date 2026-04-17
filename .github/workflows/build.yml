@@ -37,6 +37,8 @@ jobs:
           gomobile bind -androidapi 21 -v -target=android/amd64 -o frp_x86_64.aar .
           gomobile bind -androidapi 21 -v -target=android/386 -o frp_x86.aar .
           gomobile bind -androidapi 21 -v -o frp_universal.aar .
+        env:
+          GOFLAGS: -ldflags=-checklinkname=0
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
