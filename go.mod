@@ -2,4 +2,4 @@ module android-frp
 
 go 1.23.0
 
-require github.com/fatedier/frp v0.62.1
+require github.com/fatedier/frp v0.63.0
