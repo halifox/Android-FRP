@@ -2,78 +2,91 @@ package frp
 
 import (
 	"context"
-	"fmt"
+	"os"
+	"path/filepath"
+
 	"github.com/fatedier/frp/client"
 	"github.com/fatedier/frp/pkg/config"
-	"github.com/fatedier/frp/pkg/config/v1/validation"
+	"github.com/fatedier/frp/pkg/config/source"
+	"github.com/fatedier/frp/pkg/policy/featuregate"
 	"github.com/fatedier/frp/pkg/util/log"
 	"github.com/fatedier/frp/server"
-	"os"
 )
 
 func RunClient(cfgFile string) {
-	cfg, proxyCfgs, visitorCfgs, isLegacyFormat, err := config.LoadClientConfig(cfgFile, true)
+	result, err := config.LoadClientConfigResult(cfgFile, true)
 	if err != nil {
-		fmt.Println(err)
+		println(err.Error())
 		os.Exit(1)
 	}
-	if isLegacyFormat {
-		fmt.Printf("WARNING: ini format is deprecated and the support will be removed in the future, " +
-			"please use yaml/json/toml format instead!\n")
+	if len(result.Common.FeatureGates) > 0 {
+		if err := featuregate.SetFromMap(result.Common.FeatureGates); err != nil {
+			println(err.Error())
+			os.Exit(1)
+		}
 	}
 
-	warning, err := validation.ValidateAllClientConfig(cfg, proxyCfgs, visitorCfgs)
-	if warning != nil {
-		fmt.Printf("WARNING: %v\n", warning)
-	}
-	if err != nil {
-		fmt.Println(err)
+	configSource := source.NewConfigSource()
+	if err := configSource.ReplaceAll(result.Proxies, result.Visitors); err != nil {
+		println(err.Error())
 		os.Exit(1)
 	}
-	log.InitLogger(cfg.Log.To, cfg.Log.Level, int(cfg.Log.MaxDays), cfg.Log.DisablePrintColor)
 
-	if cfgFile != "" {
-		log.Infof("start frpc service for config file [%s]", cfgFile)
-		defer log.Infof("frpc service for config file [%s] stopped", cfgFile)
+	var storeSource *source.StoreSource
+	if result.Common.Store.IsEnabled() {
+		storePath := result.Common.Store.Path
+		if storePath != "" && cfgFile != "" && !filepath.IsAbs(storePath) {
+			storePath = filepath.Join(filepath.Dir(cfgFile), storePath)
+		}
+
+		storeSource, err = source.NewStoreSource(source.StoreSourceConfig{
+			Path: storePath,
+		})
+		if err != nil {
+			println(err.Error())
+			os.Exit(1)
+		}
 	}
+
+	aggregator := source.NewAggregator(configSource)
+	if storeSource != nil {
+		aggregator.SetStoreSource(storeSource)
+	}
+
+	proxyCfgs, visitorCfgs, err := aggregator.Load()
+	if err != nil {
+		println(err.Error())
+		os.Exit(1)
+	}
+
+	proxyCfgs, visitorCfgs = config.FilterClientConfigurers(result.Common, proxyCfgs, visitorCfgs)
+	proxyCfgs = config.CompleteProxyConfigurers(proxyCfgs)
+	visitorCfgs = config.CompleteVisitorConfigurers(visitorCfgs)
+	log.InitLogger(result.Common.Log.To, result.Common.Log.Level, int(result.Common.Log.MaxDays), result.Common.Log.DisablePrintColor)
+
 	svr, err := client.NewService(client.ServiceOptions{
-		Common:         cfg,
-		ProxyCfgs:      proxyCfgs,
-		VisitorCfgs:    visitorCfgs,
-		ConfigFilePath: cfgFile,
+		Common:                 result.Common,
+		ConfigSourceAggregator: aggregator,
+		ConfigFilePath:         cfgFile,
 	})
 	if err != nil {
-		fmt.Println(err)
+		println(err.Error())
 		os.Exit(1)
 	}
 	svr.Run(context.Background())
 }
 
 func RunServer(cfgFile string) {
-	cfg, isLegacyFormat, err := config.LoadServerConfig(cfgFile, true)
+	cfg, _, err := config.LoadServerConfig(cfgFile, true)
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
-	}
-	if isLegacyFormat {
-		fmt.Printf("WARNING: ini format is deprecated and the support will be removed in the future, " +
-			"please use yaml/json/toml format instead!\n")
-	}
-
-	warning, err := validation.ValidateServerConfig(cfg)
-	if warning != nil {
-		fmt.Printf("WARNING: %v\n", warning)
-	}
-	if err != nil {
-		fmt.Println(err)
+		println(err.Error())
 		os.Exit(1)
 	}
 	log.InitLogger(cfg.Log.To, cfg.Log.Level, int(cfg.Log.MaxDays), cfg.Log.DisablePrintColor)
 	svr, err := server.NewService(cfg)
 	if err != nil {
-		fmt.Println(err)
+		println(err.Error())
 		os.Exit(1)
 	}
-	log.Infof("frps started successfully")
 	svr.Run(context.Background())
 }
