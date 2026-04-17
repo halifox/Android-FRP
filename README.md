@@ -1,4 +1,4 @@
-# Android AAR for frp Client
+# Android AAR for frp
 
 该项目提供了一个 [fatedier/frp](https://github.com/fatedier/frp) 客户端的 Android AAR 库封装，使您可以在 Android 应用中直接使用 `frp` 功能。
 
